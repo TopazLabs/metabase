@@ -6,6 +6,7 @@
    [java-time.api :as t]
    [metabase.driver :as driver]
    [metabase.driver-api.core :as driver-api]
+   [metabase.driver.common :as driver.common]
    [metabase.driver.sql :as driver.sql]
    [metabase.driver.sql-jdbc :as sql-jdbc]
    [metabase.driver.sql-jdbc.common :as sql-jdbc.common]
@@ -15,6 +16,7 @@
    [metabase.driver.sql-jdbc.sync :as sql-jdbc.sync]
    [metabase.driver.sql-jdbc.sync.describe-database :as sql-jdbc.describe-database]
    [metabase.driver.sql.query-processor :as sql.qp]
+   [metabase.driver.sql.query-processor.util :as sql.qp.u]
    [metabase.driver.sync :as driver.s]
    [metabase.util :as u]
    [metabase.util.date-2 :as u.date]
@@ -45,7 +47,7 @@
                               :expression-literals              true
                               :identifiers-with-spaces          false
                               :metadata/table-existence-check   true
-                              :nested-field-columns             false
+                              :nested-field-columns             true
                               :regex/lookaheads-and-lookbehinds false
                               :rename                           true
                               :test/jvm-timezone-setting        false
@@ -53,6 +55,10 @@
                               :transforms/table                 true
                               :uuid-type                        false}]
   (defmethod driver/database-supports? [:redshift feature] [_driver _feat _db] supported?))
+
+(defmethod driver/database-supports? [:redshift :nested-field-columns]
+  [_driver _feat db]
+  (driver.common/json-unfolding-default db))
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                             metabase.driver impls                                              |
@@ -245,7 +251,7 @@
   (some-fn (sql-jdbc.sync/pattern-based-database-type->base-type
             [[#"(?i)CHARACTER VARYING" :type/Text]       ; Redshift uses CHARACTER VARYING (N) as a synonym for VARCHAR(N)
              [#"(?i)NUMERIC"           :type/Decimal]])  ; and also has a NUMERIC(P,S) type, which is the same as DECIMAL(P,S)
-           {:super       :type/*    ; (requested support in metabase#36642)
+           {:super       :type/JSON    ; SUPER type for semi-structured JSON data
             :varbyte     :type/*    ; represents variable-length binary strings
             :geometry    :type/*    ; spatial data
             :geography   :type/*    ; spatial data
@@ -672,3 +678,77 @@
   ;; https://docs.aws.amazon.com/redshift/latest/mgmt/rsql-query-tool-error-codes.html
   ;; 42P01: undefined_table, 3F000: invalid_schema_name
   (contains? #{"42P01" "3F000"} (sql-jdbc/get-sql-state e)))
+
+;;; +----------------------------------------------------------------------------------------------------------------+
+;;; |                                         JSON/SUPER Column Support                                               |
+;;; +----------------------------------------------------------------------------------------------------------------+
+
+(defmethod driver.sql/json-field-length :redshift
+  [_ json-field-identifier]
+  ;; Redshift SUPER columns can be cast to VARCHAR to get their length
+  [:length [:cast json-field-identifier :varchar]])
+
+(defn- format-redshift-json-path
+  "Format a Redshift SUPER column path expression.
+  
+  Redshift uses dot notation for accessing nested fields in SUPER columns.
+  For example: column.key or column.\"key with spaces\"
+  
+  e.g.
+  ```clj
+  [::redshift-json-path [::h2x/identifier :field [\"schema\" \"table\" \"column\"]] \"varchar\" [\"key1\" \"key2\"]]
+  =>
+  [\"(schema.table.column.key1.key2)::varchar\"]
+  ```"
+  [_fn [parent-identifier field-type path-segments]]
+  (let [[parent-sql & parent-args] (sql/format-expr parent-identifier {:nested true})
+        ;; Build the path string with proper quoting for segments with special characters
+        path-str (str/join "."
+                         (map (fn [segment]
+                                (let [segment-str (if (keyword? segment)
+                                                    (name segment)
+                                                    (str segment))]
+                                  ;; Quote if contains special characters or spaces
+                                  (if (re-find #"[^a-zA-Z0-9_]" segment-str)
+                                    (str "\"" (str/replace segment-str "\"" "\"\"") "\"")
+                                    segment-str)))
+                              path-segments))
+        full-path (if (empty? path-segments)
+                    parent-sql
+                    (format "%s.%s" parent-sql path-str))]
+    (into [(format "(%s)::%s" full-path field-type)]
+          parent-args)))
+
+(sql/register-fn! ::redshift-json-path #'format-redshift-json-path)
+
+(defmethod sql.qp/json-query :redshift
+  [_driver unwrapped-identifier nfc-field]
+  (assert (h2x/identifier? unwrapped-identifier)
+          (format "Invalid identifier: %s" (pr-str unwrapped-identifier)))
+  (let [field-type        (:database-type nfc-field)
+        nfc-path          (:nfc-path nfc-field)
+        parent-identifier (sql.qp.u/nfc-field->parent-identifier unwrapped-identifier nfc-field)
+        path-segments     (rest nfc-path)
+        ;; Determine the appropriate cast type
+        cast-type         (case (u/lower-case-en (or field-type "text"))
+                           ("text" "varchar" "character varying")
+                           "varchar"
+                           
+                           ("integer" "int" "smallint" "bigint")
+                           "bigint"
+                           
+                           ("decimal" "numeric" "float" "double precision" "real")
+                           "decimal"
+                           
+                           "boolean"
+                           "boolean"
+                           
+                           ("timestamp" "timestamptz" "timestamp with time zone")
+                           "timestamp"
+                           
+                           "date"
+                           "date"
+                           
+                           ;; Default to varchar for unknown types
+                           "varchar")]
+    [::redshift-json-path parent-identifier cast-type path-segments]))
