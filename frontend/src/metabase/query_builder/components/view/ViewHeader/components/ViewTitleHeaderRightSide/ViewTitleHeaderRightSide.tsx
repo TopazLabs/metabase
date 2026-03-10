@@ -3,6 +3,7 @@ import type React from "react";
 import { useCallback } from "react";
 import { t } from "ttag";
 
+import { useSetting } from "metabase/common/hooks";
 import { QuestionSharingMenu } from "metabase/embedding/components/SharingMenu";
 import { SERVER_ERROR_TYPES } from "metabase/lib/errors";
 import { useSelector } from "metabase/lib/redux";
@@ -21,6 +22,7 @@ import type { Dataset } from "metabase-types/api";
 import type { DatasetEditorTab, QueryBuilderMode } from "metabase-types/store";
 
 import ViewTitleHeaderS from "../../ViewTitleHeader.module.css";
+import { AIGenerateQuestionButton } from "../AIGenerateQuestionButton";
 import { ExploreResultsLink } from "../ExploreResultsLink";
 import { FilterHeaderButton } from "../FilterHeaderButton";
 import { QuestionActions } from "../QuestionActions";
@@ -99,6 +101,7 @@ export function ViewTitleHeaderRightSide({
 }: ViewTitleHeaderRightSideProps): React.JSX.Element {
   const isShowingNotebook = queryBuilderMode === "notebook";
   const canWriteToCollections = useSelector(getUserCanWriteToCollections);
+  const llmSqlGenerationEnabled = useSetting("llm-sql-generation-enabled");
 
   const hasExploreResultsLink =
     canExploreResults(question) &&
@@ -223,6 +226,7 @@ export function ViewTitleHeaderRightSide({
           />
         </Box>
       )}
+      {llmSqlGenerationEnabled && <AIGenerateQuestionButton />}
       {!isShowingNotebook && (hasSaveButton || isSaved) && (
         <QuestionSharingMenu question={question} />
       )}

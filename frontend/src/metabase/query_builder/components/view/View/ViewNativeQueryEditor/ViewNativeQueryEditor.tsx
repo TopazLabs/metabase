@@ -1,7 +1,9 @@
+import { useMemo } from "react";
 import type { ResizableBoxProps } from "react-resizable";
 
 import { useSelector } from "metabase/lib/redux";
 import { useInlineSQLPrompt } from "metabase/metabot/components/MetabotInlineSQLPrompt";
+import { useAIGenerateQuestionContext } from "metabase/query_builder/components/AIGenerateQuestion";
 import { NativeQueryEditor } from "metabase/query_builder/components/NativeQueryEditor";
 import type {
   SelectionRange,
@@ -88,6 +90,16 @@ export const ViewNativeQueryEditor = (props: ViewNativeQueryEditorProps) => {
   );
 
   const inlineSQLPrompt = useInlineSQLPrompt(question, "qb");
+  const { generatedSql, clearGeneratedSql, rejectGeneratedSql } =
+    useAIGenerateQuestionContext();
+
+  const aiProposedQuestion = useMemo(
+    () =>
+      generatedSql
+        ? question.setQuery(Lib.withNativeQuery(question.query(), generatedSql))
+        : undefined,
+    [generatedSql, question],
+  );
 
   // Normally, when users open native models,
   // they open an ad-hoc GUI question using the model as a data source
@@ -110,9 +122,19 @@ export const ViewNativeQueryEditor = (props: ViewNativeQueryEditorProps) => {
         isInitiallyOpen={isNativeEditorOpen}
         onSetDatabaseId={onSetDatabaseId}
         extensions={inlineSQLPrompt?.extensions}
-        proposedQuestion={inlineSQLPrompt?.proposedQuestion}
-        onAcceptProposed={inlineSQLPrompt?.handleAcceptProposed}
-        onRejectProposed={inlineSQLPrompt?.handleRejectProposed}
+        proposedQuestion={
+          aiProposedQuestion ?? inlineSQLPrompt?.proposedQuestion
+        }
+        onAcceptProposed={
+          aiProposedQuestion
+            ? () => clearGeneratedSql()
+            : inlineSQLPrompt?.handleAcceptProposed
+        }
+        onRejectProposed={
+          aiProposedQuestion
+            ? rejectGeneratedSql
+            : inlineSQLPrompt?.handleRejectProposed
+        }
       />
       {inlineSQLPrompt?.portalElement}
     </Box>
